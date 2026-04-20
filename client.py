@@ -29,6 +29,10 @@ class Client(object):
     def calculated_cluster_center(self):
         # ✅ FIX: safe model selection
         model = self.model if self.args.filtering_model == 'same' else self.filtering_model
+
+        if hasattr(model, "config"):
+            model.config.output_hidden_states = True
+
         model.to(self.device)
 
         loader = self.original_train_loader if self.args.filtering_model == 'same' else self.train_loader_for_filtering
