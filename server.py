@@ -107,26 +107,51 @@ class Server(object):
     def eval(self, cur_round, eval_avg_acc):
         if self.args.eval_metrics == 'none':
             eval_metric = self.eval_loss(cur_round)
+            metric_type = "loss"
+
         elif self.args.eval_metrics in ['acc']:
-            eval_metric =  self.eval_acc(cur_round)
+            eval_metric = self.eval_acc(cur_round)
+            metric_type = "acc"
+
         else:
-            eval_metric =  self.eval_generate(cur_round)
-        
+            eval_metric = self.eval_generate(cur_round)
+            metric_type = self.args.generate_eval  # rouge ή bleu
+
+    # ✔ σωστό logging
+        eval_avg_acc.append(eval_metric)
+
+    # ===== SAVE CHECKPOINTS =====
         if self.args.save and cur_round > 0:
-            save_dir = self.log_dir
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
-            if (self.args.eval_metrics == 'none' and eval_metric < np.min(eval_avg_acc)) or (self.args.eval_metrics != 'none' and eval_metric > np.max(eval_avg_acc)):
+        save_dir = self.log_dir
+        os.makedirs(save_dir, exist_ok=True)
+
+        if len(eval_avg_acc) > 1:
+            is_best = (
+                (metric_type == "loss" and eval_metric < np.min(eval_avg_acc))
+                or
+                (metric_type != "loss" and eval_metric > np.max(eval_avg_acc))
+            )
+
+            if is_best:
                 for file_name in os.listdir(save_dir):
                     if 'best' in file_name:
-                        os.remove(os.path.join(save_dir, file_name))  
-                torch.save(self.model.state_dict(), os.path.join(save_dir, f'model_state_dict_best_round{cur_round}.bin'))
-            for file_name in os.listdir(save_dir):
-                if 'final' in file_name:
-                    os.remove(os.path.join(save_dir, file_name)) 
-            torch.save(self.model.state_dict(), os.path.join(save_dir, f'model_state_dict_final_round{cur_round}.bin'))
-        eval_avg_acc.append(eval_metric)
-        return eval_metric
+                        os.remove(os.path.join(save_dir, file_name))
+
+                torch.save(
+                    self.model.state_dict(),
+                    os.path.join(save_dir, f'model_best_round{cur_round}.bin')
+                )
+
+        for file_name in os.listdir(save_dir):
+            if 'final' in file_name:
+                os.remove(os.path.join(save_dir, file_name))
+
+        torch.save(
+            self.model.state_dict(),
+            os.path.join(save_dir, f'model_final_round{cur_round}.bin')
+        )
+
+    return eval_metric, metric_type
     
     
     def eval_loss(self, cur_round):
@@ -200,43 +225,42 @@ class Server(object):
 
 
     def eval_acc(self, cur_round):
-        self.model = self.model.to(self.device)
-        self.model.eval()
-        
-        progress_bar_eval = tqdm(range(len(self.eval_loader)))
-        num_eval = 0
-        
-        all_preds = None
-        gt_labels = []
-        
-        with torch.inference_mode():
-            for batch in self.eval_loader:
-                outs = self.model(
-                    **{
-                        'input_ids': batch['input_ids'].to(self.device),
-                        'attention_mask': batch['attention_mask'].to(self.device) 
-                    }
-                )
-                gt_labels.append(batch['answer'][0])
-                
-                shift_logits = outs.logits[..., :-1, :].contiguous()
-                shift_labels = batch['labels'][..., 1:].to(self.device).contiguous()
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss(reduction='none')
-                loss = loss_fct(shift_logits.view(shift_labels.shape[0] * shift_labels.shape[1], -1),
-                                shift_labels.view(-1)).view_as(shift_labels)
-                loss = loss.mean(dim=1)
-                group_loss = loss.split(batch['split_size'])
-                preds = torch.stack([torch.argmin(l) for l in group_loss], dim=0)
+    self.model = self.model.to(self.device)
+    self.model.eval()
 
-                preds = nested_numpify(preds).tolist()
-                all_preds = preds if all_preds is None else all_preds + preds
+    progress_bar_eval = tqdm(range(len(self.eval_loader)))
 
-                progress_bar_eval.update(1)
-                
-                num_eval += len(batch['input_ids'])
-                progress_bar_eval.set_description(f'eval at round {cur_round}, acc: {acc_score(all_preds, gt_labels)}')
-        print()
-        print()
-        self.model = self.model.cpu()
-        return acc_score(all_preds, gt_labels)
+    all_preds = None
+    gt_labels = []
+
+    with torch.inference_mode():
+        for batch in self.eval_loader:
+            outs = self.model(
+                input_ids=batch['input_ids'].to(self.device),
+                attention_mask=batch['attention_mask'].to(self.device)
+            )
+
+            gt_labels.append(batch['answer'][0])
+
+            shift_logits = outs.logits[..., :-1, :].contiguous()
+            shift_labels = batch['labels'][..., 1:].to(self.device).contiguous()
+
+            loss_fct = CrossEntropyLoss(reduction='none')
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            ).view_as(shift_labels)
+
+            loss = loss.mean(dim=1)
+            group_loss = loss.split(batch['split_size'])
+
+            preds = torch.stack([torch.argmin(l) for l in group_loss], dim=0)
+
+            preds = nested_numpify(preds).tolist()
+            all_preds = preds if all_preds is None else all_preds + preds
+
+            progress_bar_eval.update(1)
+
+    self.model = self.model.cpu()
+
+    return acc_score(all_preds, gt_labels)
