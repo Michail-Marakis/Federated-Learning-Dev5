@@ -119,8 +119,18 @@ class Server(object):
             metric_type = self.args.generate_eval  # rouge / bleu
 
     # ===== LOGGING =====
-        eval_avg_acc.append(eval_metric)
+         eval_avg_acc.append(eval_metric)
+         if metric_type == "rouge":
+            if not hasattr(self, "eval_rouge_history"):
+                self.eval_rouge_history = []
 
+            self.eval_rouge_history.append(eval_metric)
+
+            with open(os.path.join(self.log_dir, 'eval_rouge.json'), 'w') as f:
+                json.dump({
+                    "eval_rouge": self.eval_rouge_history,
+                    "final_eval_rouge": self.eval_rouge_history[-1]
+                }, f)
     # ===== SAVE =====
         if self.args.save and cur_round > 0:
 
@@ -228,19 +238,26 @@ class Server(object):
                     max_new_tokens=128,
                     num_beams=1,
                 )
+                pred = output_ids[0][len(input_ids[0]):]
+                label = label_ids[0]
                 if self.args.generate_eval == 'rouge':
-                    acc_total_eval += rouge_score(output_ids[0][len(input_ids[0]):], label_ids[0], self.tokenizer)
+                        score = rouge_score(pred, label, self.tokenizer)
                 else:
-                    acc_total_eval += bleu_score(output_ids[0][len(input_ids[0]):], label_ids[0], self.tokenizer)
+                        score = bleu_score(pred, label, self.tokenizer)
+                score_total += score
+                num_samples += 1
+
                 progress_bar_eval.update(1)
-                num_eval += len(batch['input_ids'])
-                if num_eval == 0:
-                    num_eval = 1e-10
-                progress_bar_eval.set_description(f'eval at round {cur_round}, acc: {acc_total_eval / num_eval}')
+                progress_bar_eval.set_description(
+                    f'eval round {cur_round}, score: {score_total / max(num_samples,1):.4f}'
+                )
+
         print()
         print()
+
         self.model = self.model.cpu()
-        return acc_total_eval / num_eval
+
+        return score_total / max(num_samples, 1)
 
 
     def eval_acc(self, cur_round):
